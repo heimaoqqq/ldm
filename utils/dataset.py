@@ -110,3 +110,14 @@ def get_data_loaders(data_dir, image_size=256, batch_size=32, train_val_test_rat
         shuffle=False,
         num_workers=4,
         pin_memory=True
+    )
+    
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True
+    )
+    
+    return train_loader, val_loader, test_loader
