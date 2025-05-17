@@ -159,6 +159,10 @@ class Decoder(nn.Module):
         x = self.output(x)
         x = torch.tanh(x)  # 输出范围[-1, 1]
         return x
+    
+    def decode(self, x):
+        """添加decode方法与forward保持一致，解决调用兼容性问题"""
+        return self.forward(x)
 
 class PatchGANDiscriminator(nn.Module):
     """PatchGAN判别器"""
@@ -203,6 +207,7 @@ class VQVAE(nn.Module):
         self.encoder = Encoder(in_channels, latent_dim)
         self.vq_layer = VectorQuantizer(num_embeddings, latent_dim, commitment_cost)
         self.decoder = Decoder(in_channels, latent_dim)
+        self.commitment_cost = commitment_cost # 保存承诺损失权重，用于后续对抗损失的动态平衡
         
     def forward(self, x):
         z = self.encoder(x)
@@ -219,4 +224,17 @@ class VQVAE(nn.Module):
     
     def decode(self, quantized):
         """解码函数，从量化的表示重建图像"""
-        return self.decoder(quantized) 
+        return self.decoder(quantized)
+    
+    def compute_loss(self, x, recon_x, vq_loss, adv_loss, recon_criterion):
+        """计算总损失，包括重建损失、VQ损失和对抗损失的动态平衡"""
+        # 计算重建损失
+        recon_loss = recon_criterion(recon_x, x)
+        
+        # 动态平衡对抗损失和重建损失
+        # 使用承诺损失系数作为对抗损失的权重基数
+        # L_Stage1 = L_rec(x, D(E(x))) - lambda_adv * L_adv(Phi, x, D(E(x)))
+        # 这里将lambda_adv设为self.commitment_cost
+        total_loss = recon_loss - self.commitment_cost * adv_loss + vq_loss
+        
+        return total_loss, recon_loss 
