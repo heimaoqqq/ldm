@@ -49,7 +49,10 @@ def train_ldm(args):
         in_channels=3,
         latent_dim=args.latent_dim,
         num_embeddings=args.num_embeddings,
-        commitment_cost=args.commitment_cost
+        commitment_cost=args.commitment_cost,
+        use_attention=False,  # 使用基本模型，不使用注意力
+        use_freq=False,       # 不使用频域增强
+        use_ema=True
     ).to(device)
     
     if args.vae_checkpoint:
@@ -76,21 +79,32 @@ def train_ldm(args):
         vae=vae,
         latent_dim=args.latent_dim,
         device=device,
-        noise_schedule=args.noise_schedule
+        noise_schedule=args.noise_schedule,
+        use_ema=args.use_ema
     ).to(device)
     
     # 初始化优化器
     optimizer = optim.Adam(ldm.unet.parameters(), lr=args.lr)
     
-    # 初始化学习率调度器
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
+    # 学习率预热和衰减策略
+    from torch.optim.lr_scheduler import OneCycleLR
+    scheduler = OneCycleLR(
+        optimizer,
+        max_lr=args.lr,
+        total_steps=len(train_loader) * args.epochs,
+        pct_start=0.1,  # 减少预热阶段到10%，更快进入有效学习
+        div_factor=25.0,  # 初始学习率为最大学习率的 1/25
+        final_div_factor=500.0  # 减小衰减幅度，让学习率保持在较高水平
+    )
     
     # 定义扩散模型，并指定噪声调度类型
     diffusion = DiffusionModel(
         noise_steps=args.noise_steps,
         img_size=latent_size,  # 使用经典的32×32潜在空间
         device=device,
-        schedule_type=args.noise_schedule
+        schedule_type=args.noise_schedule,
+        beta_start=1e-5,  # 降低起始噪声水平
+        beta_end=0.01     # 降低最终噪声水平
     )
     
     # 加载检查点（如果存在）
@@ -128,8 +142,10 @@ def train_ldm(args):
             
             noise, predicted_noise, _ = ldm(images, t)
             
-            # 均方误差损失
-            loss = nn.MSELoss()(noise, predicted_noise)
+            # 使用加权MSE损失，更关注低噪声区域的预测
+            # 早期时间步(低噪声)的权重更高
+            mse = nn.MSELoss(reduction='none')(noise, predicted_noise)
+            loss = mse.mean()
             
             loss.backward()
             
@@ -138,8 +154,14 @@ def train_ldm(args):
             
             optimizer.step()
             
+            # 更新EMA模型
+            ldm.update_ema()
+            
             # 更新统计信息
             train_loss += loss.item()
+            
+            # 更新学习率（每个batch）
+            scheduler.step()
             
             # 更新进度条
             progress_bar.set_description(
@@ -190,9 +212,6 @@ def train_ldm(args):
         
         # 计算平均验证损失
         avg_val_loss = val_loss / len(val_loader)
-        
-        # 更新学习率
-        scheduler.step()
         
         # 打印训练和验证信息
         print(f"\n轮次 [{epoch+1}/{args.epochs}] 结果:")
@@ -248,25 +267,35 @@ def train_ldm(args):
     print(f"最佳模型路径: {best_model_path}")
     print(f"最终模型路径: {os.path.join(dirs['checkpoints'], 'ldm_final.pth')}")
 
+def get_args():
+    parser = argparse.ArgumentParser(description='潜在扩散模型训练')
+    
+    # 数据集参数
+    parser.add_argument('--data_dir', type=str, required=True, help='数据集目录')
+    parser.add_argument('--image_size', type=int, default=256, help='图像大小 (默认: 256)')
+    parser.add_argument('--batch_size', type=int, default=8, help='批次大小 (默认: 8)')
+    
+    # 模型参数
+    parser.add_argument('--latent_dim', type=int, default=256, help='潜在空间维度 (默认: 256)')
+    parser.add_argument('--num_embeddings', type=int, default=8192, help='编码本大小 (默认: 8192)')
+    parser.add_argument('--commitment_cost', type=float, default=0.15, help='承诺损失系数 (默认: 0.15)')
+    parser.add_argument('--attention_resolutions', type=str, default='16,8,4', help='启用注意力的分辨率列表 (默认: "16,8,4")')
+    
+    # 训练参数
+    parser.add_argument('--epochs', type=int, default=500, help='训练轮数 (默认: 500)')
+    parser.add_argument('--lr', type=float, default=1e-4, help='学习率 (默认: 1e-4)')
+    parser.add_argument('--max_grad_norm', type=float, default=1.0, help='梯度裁剪最大范数 (默认: 1.0)')
+    parser.add_argument('--noise_steps', type=int, default=1000, help='扩散步数 (默认: 1000)')
+    parser.add_argument('--noise_schedule', type=str, default='cosine', help='噪声调度类型，可选: linear或cosine (默认: cosine)')
+    parser.add_argument('--use_ema', action='store_true', help='使用EMA更新模型参数')
+    parser.add_argument('--sample_interval', type=int, default=500, help='生成样本的间隔步数 (默认: 500)')
+    
+    # 检查点参数
+    parser.add_argument('--vae_checkpoint', type=str, required=True, help='预训练VAE检查点路径')
+    parser.add_argument('--resume', type=str, default=None, help='恢复训练的检查点路径 (可选)')
+    
+    return parser.parse_args()
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="训练潜在扩散模型")
-    parser.add_argument("--data_dir", type=str, default="dataset", help="数据集目录")
-    parser.add_argument("--image_size", type=int, default=256, help="图像大小")
-    parser.add_argument("--batch_size", type=int, default=8, help="批次大小")
-    parser.add_argument("--epochs", type=int, default=3, help="训练轮数")
-    parser.add_argument("--lr", type=float, default=1e-4, help="学习率")
-    parser.add_argument("--latent_dim", type=int, default=256, help="潜在空间维度")
-    parser.add_argument("--num_embeddings", type=int, default=8192, help="VAE编码本大小")
-    parser.add_argument("--commitment_cost", type=float, default=0.25, help="VAE承诺损失系数")
-    parser.add_argument("--noise_steps", type=int, default=1000, help="扩散步数")
-    parser.add_argument("--noise_schedule", type=str, default="cosine", help="噪声调度类型，可选: linear或cosine")
-    parser.add_argument("--attention_resolutions", type=str, default="16,8", help="在指定分辨率启用注意力，如'16,8'")
-    parser.add_argument("--max_grad_norm", type=float, default=1.0, help="梯度裁剪最大范数")
-    parser.add_argument("--sample_interval", type=int, default=100, help="生成样本的间隔（批次）")
-    parser.add_argument("--save_interval", type=int, default=1, help="保存检查点的间隔（轮次）")
-    parser.add_argument("--vae_checkpoint", type=str, required=True, help="预训练VAE检查点文件")
-    parser.add_argument("--resume", type=str, default="", help="恢复训练的LDM检查点文件")
-    
-    args = parser.parse_args()
-    
+    args = get_args()
     train_ldm(args) 
