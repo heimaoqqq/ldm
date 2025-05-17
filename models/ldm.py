@@ -175,9 +175,10 @@ class UNet(nn.Module):
         self.init_conv = nn.Conv2d(in_channels, 256, kernel_size=3, padding=1)
         
         # 编码器下采样路径，根据注意力分辨率决定是否添加注意力
-        self.down1 = DownBlock(256, 512, add_attention=16 in attention_resolutions)    # 16x16 -> 8x8
-        self.down2 = DownBlock(512, 512, add_attention=8 in attention_resolutions)     # 8x8 -> 4x4
-        self.down3 = DownBlock(512, 512, add_attention=4 in attention_resolutions)     # 4x4 -> 2x2
+        # 明确指定分辨率启用注意力
+        self.down1 = DownBlock(256, 512, add_attention=16 in self.attention_resolutions)    # 16x16
+        self.down2 = DownBlock(512, 512, add_attention=8 in self.attention_resolutions)     # 8x8
+        self.down3 = DownBlock(512, 512, add_attention=4 in self.attention_resolutions)     # 4x4
         
         # 中间层 - 增加残差连接
         self.mid_res1 = ResidualBlock(512, 512)
@@ -185,17 +186,15 @@ class UNet(nn.Module):
         self.mid_res2 = ResidualBlock(512, 512)
         
         # 解码器上采样路径，根据注意力分辨率决定是否添加注意力
-        self.up1 = UpBlock(512, 512, add_attention=4 in attention_resolutions)         # 2x2 -> 4x4
-        self.up2 = UpBlock(512, 512, add_attention=8 in attention_resolutions)         # 4x4 -> 8x8
+        self.up1 = UpBlock(512, 512, add_attention=4 in self.attention_resolutions)         # 4x4
+        self.up2 = UpBlock(512, 512, add_attention=8 in self.attention_resolutions)         # 8x8
+        self.up3 = UpBlock(512, 256, add_attention=16 in self.attention_resolutions)        # 16x16
         
-        # 修改up3为更简单的结构，使用UpBlock类，但确保通道数匹配
-        self.up3 = UpBlock(512, 256, add_attention=16 in attention_resolutions)      # 8x8 -> 16x16
-        
-        # 时间嵌入注入
-        self.time_embed1 = nn.Linear(time_dim, 256)
-        self.time_embed2 = nn.Linear(time_dim, 512)
-        self.time_embed3 = nn.Linear(time_dim, 512)
-        self.time_embed4 = nn.Linear(time_dim, 512)
+        # 时间嵌入注入 - 确保维度匹配
+        self.time_embed1 = nn.Linear(time_dim, 256)  # 匹配初始层 256通道
+        self.time_embed2 = nn.Linear(time_dim, 512)  # 匹配down1层 512通道
+        self.time_embed3 = nn.Linear(time_dim, 512)  # 匹配down2层 512通道
+        self.time_embed4 = nn.Linear(time_dim, 512)  # 匹配down3层 512通道
         
         # 输出层
         self.final_res = ResidualBlock(256, 256)
@@ -214,16 +213,15 @@ class UNet(nn.Module):
         # 初始卷积
         h = self.init_conv(x)
         h = h + self.time_embed1(t_emb)[:, :, None, None]
-        skip1 = h  # 保存第一个跳跃连接
         
         # 编码器路径
-        h, skip2 = self.down1(h)
+        h, skip1 = self.down1(h)  # 获取第一个skip连接 (16x16)
         h = h + self.time_embed2(t_emb)[:, :, None, None]
         
-        h, skip3 = self.down2(h)
+        h, skip2 = self.down2(h)  # 获取第二个skip连接 (8x8)
         h = h + self.time_embed3(t_emb)[:, :, None, None]
         
-        h, skip4 = self.down3(h)
+        h, skip3 = self.down3(h)  # 获取第三个skip连接 (4x4)
         h = h + self.time_embed4(t_emb)[:, :, None, None]
         
         # 中间层
@@ -231,10 +229,10 @@ class UNet(nn.Module):
         h = self.mid_attn(h)
         h = self.mid_res2(h)
         
-        # 解码器路径
-        h = self.up1(h, skip4)
-        h = self.up2(h, skip3)
-        h = self.up3(h, skip1)  # 使用简化的UpBlock结构
+        # 解码器路径 - 注意正确的skip连接顺序
+        h = self.up1(h, skip3)  # 使用4x4分辨率的skip3
+        h = self.up2(h, skip2)  # 使用8x8分辨率的skip2
+        h = self.up3(h, skip1)  # 使用16x16分辨率的skip1
         
         # 输出层
         h = self.final_res(h)
