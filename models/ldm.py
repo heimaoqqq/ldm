@@ -105,9 +105,18 @@ class UpBlock(nn.Module):
     def __init__(self, in_channels, out_channels, add_attention=False):
         super(UpBlock, self).__init__()
         self.upsample = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=4, stride=2, padding=1)
-        # 当与skip连接时，通道数需要调整
-        self.res1 = ResidualBlock(out_channels * 2, out_channels)  # *2 是因为有跳跃连接
+        
+        # 记录通道数
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        
+        # 因为拼接可能导致不同的输入通道数，这里需要灵活处理
+        self.res1 = ResidualBlock(out_channels * 2, out_channels)  # 默认情况下通道数翻倍
         self.res2 = ResidualBlock(out_channels, out_channels)
+        
+        # 添加通道调整层，处理可能的通道数不匹配情况
+        self.channel_adjust = None
+        
         self.add_attention = add_attention
         if add_attention:
             self.attention = AttentionBlock(out_channels)
@@ -121,10 +130,20 @@ class UpBlock(nn.Module):
             x = F.interpolate(x, size=skip.shape[2:], mode='bilinear', align_corners=False)
             
         # 拼接特征
-        x = torch.cat([x, skip], dim=1)
+        combined = torch.cat([x, skip], dim=1)
         
+        # 检查通道数是否匹配预期，如果不匹配，动态创建调整层
+        expected_channels = self.out_channels * 2
+        if combined.shape[1] != expected_channels and self.channel_adjust is None:
+            print(f"创建通道调整层: {combined.shape[1]} -> {expected_channels}")
+            self.channel_adjust = nn.Conv2d(combined.shape[1], expected_channels, kernel_size=1).to(x.device)
+        
+        # 应用通道调整（如果需要）
+        if self.channel_adjust is not None:
+            combined = self.channel_adjust(combined)
+            
         # 通过残差块处理
-        x = self.res1(x)
+        x = self.res1(combined)
         x = self.res2(x)
         
         # 如果启用了注意力，则应用注意力机制
@@ -190,9 +209,6 @@ class UNet(nn.Module):
         self.up2 = UpBlock(512, 512, add_attention=8 in self.attention_resolutions)         # 8x8
         self.up3 = UpBlock(512, 256, add_attention=16 in self.attention_resolutions)        # 16x16
         
-        # 添加skip连接的通道调整层，用于解决维度不匹配
-        self.skip1_proj = nn.Conv2d(768, 512, kernel_size=1)
-        
         # 时间嵌入注入 - 确保维度匹配
         self.time_embed1 = nn.Linear(time_dim, 256)  # 匹配初始层 256通道
         self.time_embed2 = nn.Linear(time_dim, 512)  # 匹配down1层 512通道
@@ -235,12 +251,7 @@ class UNet(nn.Module):
         # 解码器路径 - 注意正确的skip连接顺序
         h = self.up1(h, skip3)  # 使用4x4分辨率的skip3
         h = self.up2(h, skip2)  # 使用8x8分辨率的skip2
-        
-        # 如果skip1的通道数不匹配（从错误信息看是768），则通过投影层调整
-        if skip1.shape[1] != 512:
-            skip1 = self.skip1_proj(skip1)
-            
-        h = self.up3(h, skip1)  # 使用16x16分辨率的skip1
+        h = self.up3(h, skip1)  # 使用16x16分辨率的skip1，动态处理通道数
         
         # 输出层
         h = self.final_res(h)
