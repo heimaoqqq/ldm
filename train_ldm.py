@@ -146,8 +146,8 @@ def train_ldm(args):
                 f"训练轮次 [{epoch+1}/{args.epochs}] 损失: {loss.item():.4f}"
             )
             
-            # 生成样本（可视化）
-            if i % args.sample_interval == 0:
+            # 生成样本（可视化）- 每10轮一次
+            if (epoch + 1) % 10 == 0 and i % args.sample_interval == 0:
                 with torch.no_grad():
                     samples = ldm.sample(n=1)  # 只生成一张图像
                     samples = (samples + 1) / 2  # 反归一化到[0, 1]
@@ -199,16 +199,17 @@ def train_ldm(args):
         print(f"训练损失: {avg_train_loss:.4f}")
         print(f"验证损失: {avg_val_loss:.4f}")
         
-        # 生成最终样本图像
-        with torch.no_grad():
-            samples = ldm.sample(n=1)  # 只生成一张图像
-            samples = (samples + 1) / 2  # 反归一化到[0, 1]
-            sample_path = os.path.join(dirs['samples'], f"ldm_epoch_{epoch+1}_final.png")
-            
-            # 保存生成的样本图像 - 只保存一张
-            from torchvision.utils import save_image
-            save_image(samples[0], sample_path)
-            print(f"轮次结束样本已保存: {sample_path}")
+        # 生成最终样本图像 - 每10轮或最后一轮
+        if (epoch + 1) % 10 == 0 or epoch == args.epochs - 1:
+            with torch.no_grad():
+                samples = ldm.sample(n=1)  # 只生成一张图像
+                samples = (samples + 1) / 2  # 反归一化到[0, 1]
+                sample_path = os.path.join(dirs['samples'], f"ldm_epoch_{epoch+1}_final.png")
+                
+                # 保存生成的样本图像 - 只保存一张
+                from torchvision.utils import save_image
+                save_image(samples[0], sample_path)
+                print(f"轮次结束样本已保存: {sample_path}")
         
         # 保存最佳模型
         if avg_val_loss < best_val_loss:
