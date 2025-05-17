@@ -30,7 +30,8 @@ def train_vae(args):
     train_loader, val_loader, test_loader = get_data_loaders(
         args.data_dir,
         image_size=args.image_size,
-        batch_size=args.batch_size
+        batch_size=args.batch_size,
+        use_freq_augment=args.freq_augment
     )
     
     # 使用经典的32×32×256潜在空间设计
@@ -43,22 +44,42 @@ def train_vae(args):
         in_channels=3,
         latent_dim=args.latent_dim,
         num_embeddings=args.num_embeddings,
-        commitment_cost=args.commitment_cost
+        commitment_cost=args.commitment_cost,
+        use_attention=args.use_attention,
+        use_freq=args.use_freq,
+        use_ema=args.use_ema,
+        use_perceptual=args.use_perceptual
     ).to(device)
     
     discriminator = PatchGANDiscriminator(
         in_channels=3,
-        ndf=args.disc_filters
+        ndf=args.disc_filters,
+        use_spectral_norm=args.use_spectral_norm
     ).to(device)
     
     # 初始化优化器
-    vae_optimizer = optim.Adam(vae.parameters(), lr=args.lr)
-    disc_optimizer = optim.Adam(discriminator.parameters(), lr=args.lr)
+    vae_optimizer = optim.Adam(vae.parameters(), lr=args.lr, betas=(0.5, 0.999))
+    disc_optimizer = optim.Adam(discriminator.parameters(), lr=args.lr * args.disc_lr_factor, betas=(0.5, 0.999))
     
-    # 使用余弦退火学习率调度器
-    print(f"使用余弦退火学习率调度，初始学习率: {args.lr}, 最大轮次: {args.epochs}")
-    vae_scheduler = CosineAnnealingLR(vae_optimizer, T_max=args.epochs)
-    disc_scheduler = CosineAnnealingLR(disc_optimizer, T_max=args.epochs)
+    # 使用学习率优化器
+    print(f"使用OneCycleLR学习率调度，初始学习率: {args.lr}, 最大轮次: {args.epochs}")
+    vae_scheduler = optim.lr_scheduler.OneCycleLR(
+        vae_optimizer,
+        max_lr=args.lr,
+        total_steps=len(train_loader) * args.epochs,
+        pct_start=0.2,  # 前20%用于预热
+        div_factor=25.0,  # 初始学习率为最大学习率的 1/25
+        final_div_factor=5000.0  # 修改为更温和的衰减速率
+    )
+    
+    disc_scheduler = optim.lr_scheduler.OneCycleLR(
+        disc_optimizer,
+        max_lr=args.lr * args.disc_lr_factor,
+        total_steps=len(train_loader) * args.epochs,
+        pct_start=0.2,
+        div_factor=25.0,
+        final_div_factor=5000.0  # 修改为更温和的衰减速率
+    )
     
     # 梯度裁剪配置
     max_grad_norm = 1.0
@@ -161,6 +182,10 @@ def train_vae(args):
             
             vae_optimizer.step()
             
+            # 更新学习率(每个batch)
+            vae_scheduler.step()
+            disc_scheduler.step()
+            
             # 更新统计信息
             train_recon_loss += recon_loss.item()
             train_gan_loss += adv_loss.item()
@@ -205,7 +230,15 @@ def train_vae(args):
                 # 计算损失
                 adv_loss = adv_criterion(fake_logits, real_labels)
                 recon_loss = recon_criterion(reconstructed, real_images)
-                total_loss = recon_loss - adv_loss + commit_loss
+                
+                # 使用相同的损失计算函数
+                total_loss, recon_loss = vae.compute_loss(
+                    real_images, 
+                    reconstructed, 
+                    commit_loss, 
+                    adv_loss, 
+                    recon_criterion
+                )
                 
                 # 更新统计信息
                 val_recon_loss += recon_loss.item()
@@ -226,10 +259,6 @@ def train_vae(args):
         avg_val_gan_loss = val_gan_loss / len(val_loader)
         avg_val_commit_loss = val_commit_loss / len(val_loader)
         avg_val_total_loss = val_total_loss / len(val_loader)
-        
-        # 更新学习率
-        vae_scheduler.step()
-        disc_scheduler.step()
         
         # 打印训练和验证信息
         print(f"\n轮次 [{epoch+1}/{args.epochs}] 结果:")
@@ -310,15 +339,32 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="训练VAE模型")
     parser.add_argument("--data_dir", type=str, default="dataset", help="数据集目录")
     parser.add_argument("--image_size", type=int, default=256, help="图像大小")
-    parser.add_argument("--batch_size", type=int, default=16, help="批次大小")
-    parser.add_argument("--epochs", type=int, default=10, help="训练轮数")
+    parser.add_argument("--batch_size", type=int, default=4, help="批次大小")
+    parser.add_argument("--epochs", type=int, default=200, help="训练轮数")
     parser.add_argument("--lr", type=float, default=1e-4, help="学习率")
     parser.add_argument("--latent_dim", type=int, default=256, help="潜在空间维度")
     parser.add_argument("--num_embeddings", type=int, default=8192, help="编码本大小")
-    parser.add_argument("--commitment_cost", type=float, default=0.25, help="承诺损失系数")
-    parser.add_argument("--disc_filters", type=int, default=64, help="判别器基础过滤器数量")
-    parser.add_argument("--save_interval", type=int, default=1, help="保存检查点的间隔（轮次）")
+    parser.add_argument("--commitment_cost", type=float, default=0.15, help="承诺损失系数")
+    parser.add_argument("--disc_filters", type=int, default=32, help="判别器基础过滤器数量")
+    parser.add_argument("--save_interval", type=int, default=5, help="保存检查点的间隔（轮次）")
     parser.add_argument("--resume", type=str, default="", help="恢复训练的检查点文件")
+    parser.add_argument("--use_attention", action="store_true", help="是否使用注意力机制")
+    parser.add_argument("--use_freq", action="store_true", help="是否使用频率特征")
+    parser.add_argument("--use_ema", action="store_true", help="是否使用指数移动平均")
+    parser.add_argument("--use_perceptual", action="store_true", help="是否使用感知损失")
+    parser.add_argument("--use_spectral_norm", action="store_true", help="是否使用谱归一化")
+    parser.add_argument("--disc_lr_factor", type=float, default=0.5, help="判别器学习率因子")
+    parser.add_argument("--freq_augment", action="store_true", help="是否使用频率增强")
+    
+    # 为微多普勒时频图设置推荐参数
+    parser.set_defaults(
+        use_attention=True, 
+        use_freq=True, 
+        use_ema=True, 
+        use_spectral_norm=True,
+        use_perceptual=False,  # 感知损失非常占显存
+        freq_augment=True
+    )
     
     args = parser.parse_args()
     
