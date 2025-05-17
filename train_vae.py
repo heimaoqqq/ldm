@@ -143,9 +143,15 @@ def train_vae(args):
             # 重建损失 - 使重建图像接近原始图像
             recon_loss = recon_criterion(reconstructed, real_images)
             
-            # 公式中对抗损失是负项
-            # L_Stage1 = min_(E,D) max_Phi (L_rec(x, D(E(x))) - lambda_adv * L_adv(Phi, x, D(E(x))))
-            total_loss = recon_loss - adv_loss + commit_loss
+            # 使用VQVAE的损失计算方法，实现动态平衡
+            # 原始公式: L_Stage1 = L_rec(x, D(E(x))) - lambda_adv * L_adv(Phi, x, D(E(x)))
+            total_loss, recon_loss = vae.compute_loss(
+                real_images, 
+                reconstructed, 
+                commit_loss, 
+                adv_loss, 
+                recon_criterion
+            )
             
             # 反向传播总损失
             total_loss.backward()
