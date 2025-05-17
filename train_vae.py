@@ -244,34 +244,35 @@ def train_vae(args):
             )
             print(f"发现新的最佳模型！已保存至: {best_model_path}")
         
-        # 每个epoch结束后评估并生成样本
-        with torch.no_grad():
-            vae.eval()
-            
-            # 选择测试批次
-            test_batch = next(iter(test_loader)).to(device)
-            
-            # 生成重建图像
-            reconstructed, _, _ = vae(test_batch)
-            
-            # 绘制重建图像
-            plot_reconstruction(
-                test_batch,
-                reconstructed,
-                dirs['samples'],
-                f"vae_reconstruction_epoch_{epoch+1}.png"
-            )
-            
-            # 使用解码器生成样本
-            save_samples(
-                vae.decoder,
-                device,
-                1,  # 只生成1个样本
-                args.image_size,
-                args.latent_dim,
-                dirs['samples'],
-                f"vae_samples_epoch_{epoch+1}.png"
-            )
+        # 每10轮或最后一轮生成和保存图像
+        if (epoch + 1) % 10 == 0 or epoch == args.epochs - 1:
+            with torch.no_grad():
+                vae.eval()
+                
+                # 选择测试批次
+                test_batch = next(iter(test_loader)).to(device)
+                
+                # 生成重建图像
+                reconstructed, _, _ = vae(test_batch)
+                
+                # 绘制重建图像
+                plot_reconstruction(
+                    test_batch,
+                    reconstructed,
+                    dirs['samples'],
+                    f"vae_reconstruction_epoch_{epoch+1}.png"
+                )
+                
+                # 使用解码器生成样本
+                save_samples(
+                    vae.decoder,
+                    device,
+                    1,  # 只生成1个样本
+                    args.image_size,
+                    args.latent_dim,
+                    dirs['samples'],
+                    f"vae_samples_epoch_{epoch+1}.png"
+                )
         
         # 保存检查点
         if (epoch + 1) % args.save_interval == 0:
